@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>bili-note · B站视频笔记</title>
+<link rel="stylesheet" href="/static/style.css?v=12">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <h1>bili<span>-note</span></h1>
+      <span class="brand-ver" id="brand-ver" title="版本"></span>
+      <span class="brand-sub">B站链接 → 视频 + 带时间戳文字稿 + 字幕</span>
+    </div>
+    <div class="topbar-actions">
+      <button id="btn-open-out" class="btn ghost small" title="打开产物目录（下载类任务的产物在这里；本地文件任务的产物在源文件旁边）">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M1.75 4.25A1.25 1.25 0 0 1 3 3h3l1.5 1.75h5.25a1.25 1.25 0 0 1 1.25 1.25v5.75A1.25 1.25 0 0 1 12.75 13H3a1.25 1.25 0 0 1-1.25-1.25z"/>
+        </svg>
+        打开本地输出目录
+      </button>
+      <button id="btn-settings" class="icon-btn" title="设置">⚙</button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="panel">
+    <div class="tabs">
+      <button type="button" class="tab active" id="tab-download">下载视频</button>
+      <button type="button" class="tab" id="tab-local">本地转写</button>
+    </div>
+
+    <div class="model-row">
+      <span class="model-label">转写模型</span>
+      <div class="model-picker" id="model-picker">
+        <button type="button" class="model-picker-btn" id="model-picker-btn">
+          <span id="model-current-label">large-v3</span>
+          <span class="caret">▾</span>
+        </button>
+        <div class="model-menu hidden" id="model-menu">
+          <div class="model-option active" data-model="large-v3">
+            <span class="model-name">large-v3</span>
+            <span class="model-desc">质量最高 · 较慢</span>
+          </div>
+          <div class="model-option" data-model="large-v3-turbo">
+            <span class="model-name">large-v3-turbo</span>
+            <span class="model-desc">更快 · 质量约 99%</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="panel-download">
+      <textarea id="urls" spellcheck="false"
+        placeholder="粘贴 B 站链接，每行一个（支持批量）&#10;https://www.bilibili.com/video/BV1xxxxxxxxxxxxx"></textarea>
+      <div class="controls">
+        <label class="switch">
+          <input type="checkbox" id="opt-download" checked>
+          <span class="slider"></span>
+          <span class="switch-label">下载视频</span>
+        </label>
+        <label class="switch">
+          <input type="checkbox" id="opt-transcribe" checked>
+          <span class="slider"></span>
+          <span class="switch-label">转写文字稿</span>
+        </label>
+        <button id="btn-start-download" class="btn primary">开始</button>
+      </div>
+      <p class="hint">下载默认 1080P，无则取该视频最高可用。转写完成后，任务卡片上会多一个「总结」按钮。</p>
+    </div>
+
+    <div class="tab-panel hidden" id="panel-local">
+      <textarea id="files" spellcheck="false"
+        placeholder="粘贴本地视频/音频文件完整路径，每行一个（支持批量）&#10;示例：D:\Videos\课程\高数01.mp4&#10;也可以粘已有的 .txt 文稿路径 —— 会跳过转写，直接给你一个可总结的任务"></textarea>
+      <div class="controls">
+        <button id="btn-start-local" class="btn primary">开始转写</button>
+      </div>
+      <p class="hint">在文件管理器选中文件 → Shift+右键 → 「复制为路径」，粘贴到上面。转写结果 .txt / .srt 保存在原视频同目录。<br>
+        粘 <b>.txt 文稿路径</b>可以不重新转写、直接对已有文稿做总结。</p>
+    </div>
+
+    <p class="hint flash" id="hint"></p>
+  </section>
+
+  <section class="panel tasks">
+    <div class="tasks-head">
+      <h2>任务</h2>
+      <span class="count" id="task-count"></span>
+    </div>
+    <div id="task-list"></div>
+    <p class="empty" id="empty">暂无任务</p>
+  </section>
+
+  <!-- 已有文稿：自动扫描 output/，与任务列表分开（任务表是内存态、重启即空，
+       而磁盘上的文稿一直都在，两者生命周期不同，混在一起就分不清哪些是这轮跑的） -->
+  <section class="panel library">
+    <div class="tasks-head">
+      <h2>已有文稿</h2>
+      <span class="count" id="lib-count"></span>
+      <button id="btn-lib-refresh" class="btn ghost small lib-refresh" title="重新扫描 output 目录">刷新</button>
+    </div>
+    <p class="hint" id="lib-hint">打开页面自动扫描 <code>output/</code>，把已经转写好的文稿列在这里 —— 直接预览，不用再粘路径。</p>
+    <div id="library-list"></div>
+    <p class="empty" id="lib-empty">output/ 里还没有文稿</p>
+  </section>
+
+</main>
+
+<!-- 文字稿预览 -->
+<div id="modal" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h3 id="modal-title">文字稿</h3>
+      <button id="modal-close" class="btn ghost">关闭</button>
+    </div>
+    <pre id="modal-body"></pre>
+  </div>
+</div>
+
+<!-- 总结面板 -->
+<div id="sum-modal" class="modal hidden">
+  <div class="modal-box wide">
+    <div class="modal-head">
+      <h3 id="sum-title">总结</h3>
+      <div class="sum-tools">
+        <select id="sum-template" title="提示词模板"></select>
+        <label class="switch mini" title="是否要求总结标注时间戳">
+          <input type="checkbox" id="sum-ts" checked>
+          <span class="slider"></span>
+          <span class="switch-label">时间戳</span>
+        </label>
+        <button id="sum-regen" class="btn small">重新生成</button>
+        <button id="sum-stop" class="btn small danger hidden">停止</button>
+        <button id="sum-copy" class="btn small">复制</button>
+        <button id="sum-close" class="btn ghost">关闭</button>
+      </div>
+    </div>
+    <div class="sum-status" id="sum-status"></div>
+    <div class="sum-progress hidden" id="sum-progress">
+      <div class="sum-progress-bar"><i id="sum-progress-fill"></i></div>
+      <span id="sum-progress-label"></span>
+    </div>
+    <div class="sum-warn hidden" id="sum-warn"></div>
+    <div class="sum-outline hidden" id="sum-outline">
+      <div class="sum-outline-head" id="sum-outline-head">
+        <span id="sum-outline-label">速览（骨架）</span>
+        <span class="think-caret" id="sum-outline-caret">▾</span>
+      </div>
+      <div class="sum-outline-body" id="sum-outline-body"></div>
+    </div>
+    <div class="sum-think hidden" id="sum-think">
+      <div class="sum-think-head" id="sum-think-head">
+        <span class="think-dot"></span>
+        <span id="sum-think-label">模型正在思考…</span>
+        <span class="think-caret" id="sum-think-caret">▸</span>
+      </div>
+      <pre class="sum-think-body hidden" id="sum-think-body"></pre>
+    </div>
+    <div class="sum-custom hidden" id="sum-custom-wrap">
+      <textarea id="sum-custom" spellcheck="false"
+        placeholder="自定义提示词（模板选「自定义」时生效）。只写「你想要什么」就行，例如：全面总结要点，不重要的点也总结，不要概括得太精炼以至于丢失细节和原味，可以适当引用原文。字数、格式、"不许脑补"这类底线由系统另外保证，不用重复交代。"></textarea>
+    </div>
+    <div class="sum-body" id="sum-body"></div>
+    <div class="sum-player hidden" id="sum-player">
+      <video id="sum-video" controls preload="metadata"></video>
+    </div>
+  </div>
+</div>
+
+<!-- 移除任务确认 -->
+<div id="confirm-modal" class="modal hidden">
+  <div class="modal-box narrow">
+    <div class="modal-head">
+      <h3 id="confirm-title">移除任务</h3>
+      <button id="confirm-close" class="btn ghost">关闭</button>
+    </div>
+    <div class="confirm-body">
+      <p class="confirm-note" id="confirm-note">读取中…</p>
+      <div class="confirm-section" id="confirm-del-wrap">
+        <div class="confirm-label danger">将删除 <span id="confirm-del-count"></span></div>
+        <ul class="confirm-list danger" id="confirm-del"></ul>
+      </div>
+      <div class="confirm-section hidden" id="confirm-keep-wrap">
+        <div class="confirm-label">将保留</div>
+        <ul class="confirm-list" id="confirm-keep"></ul>
+      </div>
+    </div>
+    <div class="set-actions">
+      <button id="confirm-only" class="btn ghost">仅移除记录</button>
+      <button id="confirm-withfiles" class="btn danger">移除并删除文件</button>
+    </div>
+  </div>
+</div>
+
+<!-- 设置 -->
+<div id="set-modal" class="modal hidden">
+  <div class="modal-box narrow">
+    <div class="modal-head">
+      <h3>设置</h3>
+      <button id="set-close" class="btn ghost">关闭</button>
+    </div>
+    <div class="set-body">
+      <label class="field">
+        <span>接口地址（OpenAI 兼容）</span>
+        <input id="set-base" type="text" spellcheck="false" placeholder="https://api.deepseek.com/v1">
+      </label>
+      <label class="field">
+        <span>API Key<span class="field-note" id="set-key-note"></span></span>
+        <input id="set-key" type="password" spellcheck="false" placeholder="留空 = 不修改">
+      </label>
+      <label class="field">
+        <span>模型</span>
+        <input id="set-model" type="text" spellcheck="false" list="model-list" placeholder="deepseek-chat">
+        <datalist id="model-list"></datalist>
+      </label>
+      <label class="field">
+        <span>最大输出 tokens<span class="field-note" id="set-tok-note"></span></span>
+        <input id="set-maxtok" type="number" min="256" step="256" placeholder="8000">
+      </label>
+      <label class="field">
+        <span>同时总结数<span class="field-note" id="set-concurrent-note"></span></span>
+        <input id="set-concurrent" type="number" min="1" max="10" step="1" placeholder="3">
+      </label>
+      <p class="hint" id="set-concurrent-hint">
+        总结现在是**后台作业**：关掉弹窗、切走页面它都继续跑，首页每张任务卡各显示各的进度。
+        这个数字是同时能跑几个——调大能一次开更多视频，代价是并发连接和 token 速率也会上去。
+      </p>
+      <label class="switch field-switch">
+        <input type="checkbox" id="set-thinking" checked>
+        <span class="slider"></span>
+        <span class="switch-label">启用思考（推理模型）</span>
+      </label>
+      <p class="hint" id="set-thinking-hint">
+        推理模型会先「思考」再写：质量通常更好，但首字可能要等 30~60 秒，且**思考过程会占用「最大输出 tokens」**。
+        关掉可秒回，但质量差异未验证——建议先保持开启。
+      </p>
+      <p class="set-msg" id="set-msg"></p>
+      <div class="set-actions">
+        <button id="set-test" class="btn ghost">测试连接</button>
+        <button id="set-save" class="btn primary">保存</button>
+      </div>
+      <p class="hint">
+        Key 存在 <code>config.json</code>（已在 <code>.gitignore</code> 里，不会进 git）；也可用环境变量
+        <code>BILI_NOTE_API_KEY</code> 覆盖，环境变量优先级更高。
+      </p>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js?v=12"></script>
+</body>
+</html>

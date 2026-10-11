@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 输出文件
+output/
+
+# 模型缓存（约 3GB，下载来的，不入库）
+models/
+
+# 本地配置（含 API Key，绝不入库）
+config.json
+config.json.selftest-backup
+
+# 自检临时目录
+.selftest-tmp/
+
+# 杂项
+.DS_Store
+*.log
+*.log.err
+
+# 界面量具截图（画面里有 output/ 下的文稿标题，不入库）
+.verify/shots/
