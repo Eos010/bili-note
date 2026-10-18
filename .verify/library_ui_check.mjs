@@ -181,6 +181,16 @@ async function main() {
     const loaded = cdp.once("Page.loadEventFired");
     await cdp.send("Page.navigate", { url: `${BASE}/` });
     await Promise.race([loaded, sleep(8000)]);
+
+    // V3 首次向导是整屏弹窗，会挡住真实鼠标点击。先把它收起来，测完恢复 onboarded。
+    const onboardedBefore = (await (await fetch(`${BASE}/api/asr/status`)).json()).onboarded;
+    const onboardVisible = await poll(
+      `!document.querySelector("#onboard-modal")?.classList.contains("hidden")`, 6000);
+    if (onboardVisible) {
+      await evaluate(`document.querySelector("#onboard-skip")?.click()`);
+      await sleep(900);
+    }
+
     const rendered = await poll(`document.querySelectorAll("#library-list .lib-item").length`, 8000);
     check("打开页面就自动列出已有文稿（不点任何按钮）", rendered > 0, ` 实际 ${rendered} 条`);
     check("计数文字与条数一致",
@@ -225,6 +235,15 @@ async function main() {
     check("点关闭能关掉总结面板", (await evaluate(`document.querySelector("#sum-modal").classList.contains("hidden")`)) === true);
 
     check("页面没有未捕获的脚本错误", pageErrors.length === 0, ` ${pageErrors.join(" | ")}`);
+
+    // 把首次向导状态恢复原样，别让量具改掉用户配置
+    if (!onboardedBefore) {
+      await fetch(`${BASE}/api/asr/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ onboarded: false }),
+      }).catch(() => {});
+    }
   } finally {
     child.kill();
   }

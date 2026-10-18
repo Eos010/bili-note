@@ -24,3 +24,13 @@ config.json.selftest-backup
 
 # 界面量具截图（画面里有 output/ 下的文稿标题，不入库）
 .verify/shots/
+
+# V3：打包产物 / 本地工具 / 运行态文件
+dist/
+build/
+release/
+tools/ffmpeg/
+tools/ffmpeg.zip
+instance.json
+install.log
+

@@ -73,7 +73,21 @@ class VideoInfo:
 
 
 def find_ffmpeg_bin() -> Optional[str]:
-    """定位 ffmpeg 所在目录：PATH → WinGet 包位置。找不到返回 None。"""
+    """定位 ffmpeg 所在目录：随包/项目 tools → PATH → WinGet 包位置。
+
+    便携包会把 ffmpeg 放在 `<程序根>/tools/ffmpeg/bin`（PyInstaller 下是
+    `_internal/tools/ffmpeg/bin`），这时不依赖用户机器上装没装 ffmpeg。
+    """
+    from . import app_paths
+
+    for candidate in (
+        app_paths.TOOLS_DIR / "ffmpeg" / "bin",
+        app_paths.TOOLS_DIR / "ffmpeg",
+    ):
+        exe = candidate / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+        if exe.is_file():
+            return str(candidate)
+
     p = shutil.which("ffmpeg")
     if p:
         return os.path.dirname(p)

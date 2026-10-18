@@ -8,11 +8,12 @@ from __future__ import annotations
 import copy
 import json
 import os
-from pathlib import Path
 from typing import Any
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-CONFIG_PATH = BASE_DIR / "config.json"
+from . import app_paths
+
+BASE_DIR = app_paths.APP_ROOT
+CONFIG_PATH = app_paths.CONFIG_PATH
 
 ENV_API_KEY = "BILI_NOTE_API_KEY"
 ENV_BASE_URL = "BILI_NOTE_BASE_URL"
@@ -39,6 +40,25 @@ DEFAULTS: dict[str, Any] = {
         # 关掉页面也继续跑，所以这里要有个闸门，别让一批任务把并发和 token 速率打爆。
         "max_concurrent": 3,
     },
+    # V3：转写模型与设备。默认 small（464MB，CPU 可跑），**不会自动下载**。
+    # device=auto：CUDA 探测通过才走 GPU，否则 CPU——等价于"默认 CPU"，但不浪费显卡。
+    "transcribe": {
+        "model": "small",
+        "device": "auto",        # auto / cpu / cuda
+        "cpu_threads": 0,        # 0 = 交给 ctranslate2 自己决定
+        "beam_size": 5,
+    },
+    # V3：模型下载源与目录。dir 为空 = 数据目录下的 models/。
+    "models": {
+        "dir": "",
+        "endpoint": "mirror",    # mirror / official / custom
+        "custom_endpoint": "",
+        "proxy": "",
+    },
+    # V3：首次向导是否已经走过。走过就不再弹（设置里可重新打开）。
+    "ui": {
+        "onboarded": False,
+    },
 }
 
 # 允许前端写入的字段白名单（防越权写任意键）
@@ -47,6 +67,17 @@ _WRITABLE = {
             "timeout_read", "thinking_enabled"},
     "summarize": {"seg_chars", "seg_seconds", "gap_seconds", "with_timestamp",
                   "template", "max_concurrent"},
+    "transcribe": {"model", "device", "cpu_threads", "beam_size"},
+    "models": {"dir", "endpoint", "custom_endpoint", "proxy"},
+    "ui": {"onboarded"},
+}
+
+# 这些字段的空字符串是**有意义的**（表示"恢复默认/清除代理"），不能按"不修改"处理。
+# 其余字段沿用老规则：空串 = 不改（尤其 api_key，绝不能因为前端留空就把 Key 清掉）。
+_CLEARABLE = {
+    ("models", "dir"),
+    ("models", "proxy"),
+    ("models", "custom_endpoint"),
 }
 
 
@@ -81,20 +112,30 @@ def load() -> dict:
 
 
 def save(patch: dict) -> dict:
-    """按白名单合并写入 config.json。空字符串视为"不修改"（防误清 Key）。"""
+    """按白名单合并写入 config.json。
+
+    空字符串默认视为"不修改"（防误清 Key）；但 `models.dir` / `models.proxy` /
+    `models.custom_endpoint` 的空串是清除语义，单独放行。
+    """
     clean: dict[str, dict] = {}
     for section, fields in _WRITABLE.items():
         incoming = patch.get(section)
         if not isinstance(incoming, dict):
             continue
-        kept = {
-            k: v for k, v in incoming.items()
-            if k in fields and v is not None and not (isinstance(v, str) and v.strip() == "")
-        }
+        kept = {}
+        for k, v in incoming.items():
+            if k not in fields or v is None:
+                continue
+            if isinstance(v, str) and v.strip() == "":
+                if (section, k) not in _CLEARABLE:
+                    continue
+                v = ""
+            kept[k] = v
         if kept:
             clean[section] = kept
     if clean:
         merged = _deep_merge(_read_raw(), clean)
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_PATH.write_text(
             json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
         )

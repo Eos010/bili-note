@@ -1,0 +1,2 @@
+# 只给 build_portable.ps1 用，运行时不需要。
+pyinstaller>=6.11,<7

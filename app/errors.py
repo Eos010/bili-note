@@ -22,6 +22,21 @@ class CancelledError(Exception):
         return self.message
 
 
+class ModelNotReady(Exception):
+    """转写模型没下载 / 目录不存在 / 文件不完整。
+
+    V3 之前这里会触发 faster-whisper 的静默下载（几个 G、没有进度）；
+    现在必须是**可读的错误**，由前端引导用户去“设置 → 转写模型”下载。
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+    def __str__(self) -> str:  # noqa: D105
+        return self.message
+
+
 # ---------------------------------------------------------------- 报错翻译
 #
 # yt-dlp 的原始报错是给开发者看的（英文 + 内部堆栈），直接甩给用户等于没说。
@@ -48,7 +63,13 @@ _SIGNATURES: list[tuple[tuple[str, ...], str, str, str]] = [
         "先重试一次；仍失败就换个视频试试，确认是不是这条链接特有。",
     ),
     (
-        ("http error 404", "video unavailable", "not found", "不存在", "已删除", "已下架"),
+        ("文件不存在", "no such file", "cannot find the path", "找不到指定的文件"),
+        "本地文件不存在",
+        "这个路径下没有找到文件。",
+        "检查路径是否写对、文件是否被移动；也可以把文件拖进资源管理器复制完整路径。",
+    ),
+    (
+        ("http error 404", "video unavailable", "视频不存在", "视频已删除", "已下架"),
         "视频不存在或已下架",
         "链接指向的视频在 B 站上已经找不到了。",
         "核对一下链接，或者换个源。",
@@ -76,7 +97,19 @@ _SIGNATURES: list[tuple[tuple[str, ...], str, str, str]] = [
         ("ffmpeg",),
         "ffmpeg 出问题",
         "音视频合并需要 ffmpeg，可能没装或不在 PATH。",
-        "确认 ffmpeg 可用（项目会自动在 WinGet 目录里找）。",
+        "确认 ffmpeg 可用（便携版自带；源码版重新跑 install.bat）。",
+    ),
+    (
+        ("cublas", "cudnn", "cublaslt", "cuda driver", "no cuda-capable device"),
+        "GPU 运行库不可用",
+        "检测到显卡，但 ctranslate2 缺 CUDA 运行库（cublas / cuDNN）或驱动太旧。",
+        "任务会自动回退 CPU；要用 GPU，请重新跑 install.bat，或在设置里确认「CUDA 可用」。",
+    ),
+    (
+        ("model.bin", "localentrynotfound", "not found in cache", "model_not_found"),
+        "转写模型不可用",
+        "模型文件不完整或不在当前模型目录里。",
+        "打开「设置 → 转写模型」重新下载，或把模型目录改回原来那个。",
     ),
     (
         ("no space left", "磁盘空间", "disk full"),
@@ -107,6 +140,8 @@ _SIGNATURES: list[tuple[tuple[str, ...], str, str, str]] = [
 
 def explain(error: object) -> str:
     """把异常翻成「发生了什么 + 怎么办」，原始报错附在最后。"""
+    if isinstance(error, ModelNotReady):
+        return str(error)  # 这条消息本来就是写给用户看的，不要再包一层
     raw = str(error).strip() or type(error).__name__
     low = raw.lower()
     for keys, title, what, todo in _SIGNATURES:

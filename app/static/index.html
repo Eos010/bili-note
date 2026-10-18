@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>bili-note · B站视频笔记</title>
-<link rel="stylesheet" href="/static/style.css?v=12">
+<link rel="stylesheet" href="/static/style.css?v=13">
 </head>
 <body>
 
@@ -40,21 +40,14 @@
       <span class="model-label">转写模型</span>
       <div class="model-picker" id="model-picker">
         <button type="button" class="model-picker-btn" id="model-picker-btn">
-          <span id="model-current-label">large-v3</span>
+          <span id="model-current-label">small</span>
           <span class="caret">▾</span>
         </button>
-        <div class="model-menu hidden" id="model-menu">
-          <div class="model-option active" data-model="large-v3">
-            <span class="model-name">large-v3</span>
-            <span class="model-desc">质量最高 · 较慢</span>
-          </div>
-          <div class="model-option" data-model="large-v3-turbo">
-            <span class="model-name">large-v3-turbo</span>
-            <span class="model-desc">更快 · 质量约 99%</span>
-          </div>
-        </div>
+        <div class="model-menu hidden" id="model-menu"></div>
       </div>
+      <span class="model-hint" id="model-hint">读取模型状态…</span>
     </div>
+    <div class="model-banner hidden" id="model-banner"></div>
 
     <div class="tab-panel" id="panel-download">
       <textarea id="urls" spellcheck="false"
@@ -198,6 +191,49 @@
   </div>
 </div>
 
+<!-- 首次向导（V3）：先看硬件，再由用户决定下不下模型。默认不下载。 -->
+<div id="onboard-modal" class="modal hidden">
+  <div class="modal-box onboard">
+    <div class="modal-head">
+      <h3>欢迎使用 bili-note V3</h3>
+      <button id="onboard-close" class="btn ghost">稍后再说</button>
+    </div>
+    <div class="onboard-body">
+      <p class="onboard-lead">
+        先检查这台机器，再决定要不要下载转写模型。<b>不点下载就什么都不会下。</b>
+        只想先存视频的话，点下面的「先不下载」也能用。
+      </p>
+      <div class="check-grid" id="onboard-checks"></div>
+      <h4 class="onboard-title">选一个转写模型</h4>
+      <p class="hint onboard-tip">绿色＝推荐下载；红色＝配置不足，不推荐（仍可强行下载，但会很慢或跑不动）。</p>
+      <div class="onboard-models" id="onboard-models"></div>
+      <div class="onboard-source">
+        <label class="field compact">
+          <span>下载源</span>
+          <select id="onboard-endpoint">
+            <option value="mirror">国内镜像 hf-mirror.com（推荐）</option>
+            <option value="official">HuggingFace 官方</option>
+            <option value="custom">自定义</option>
+          </select>
+        </label>
+        <label class="field compact hidden" id="onboard-custom-wrap">
+          <span>自定义源</span>
+          <input id="onboard-custom-endpoint" type="text" spellcheck="false" placeholder="https://…">
+        </label>
+      </div>
+      <div class="onboard-progress hidden" id="onboard-progress">
+        <div class="bar"><div id="onboard-progress-fill"></div></div>
+        <span id="onboard-progress-label"></span>
+      </div>
+      <p class="hint" id="onboard-msg"></p>
+    </div>
+    <div class="set-actions">
+      <button id="onboard-skip" class="btn ghost">先不下载，仅下载视频</button>
+      <button id="onboard-start" class="btn primary">下载并开始</button>
+    </div>
+  </div>
+</div>
+
 <!-- 设置 -->
 <div id="set-modal" class="modal hidden">
   <div class="modal-box narrow">
@@ -205,7 +241,11 @@
       <h3>设置</h3>
       <button id="set-close" class="btn ghost">关闭</button>
     </div>
-    <div class="set-body">
+    <div class="set-tabs">
+      <button type="button" class="set-tab active" data-pane="llm">AI 总结</button>
+      <button type="button" class="set-tab" data-pane="asr">转写模型</button>
+    </div>
+    <div class="set-body" id="set-pane-llm">
       <label class="field">
         <span>接口地址（OpenAI 兼容）</span>
         <input id="set-base" type="text" spellcheck="false" placeholder="https://api.deepseek.com/v1">
@@ -250,9 +290,59 @@
         <code>BILI_NOTE_API_KEY</code> 覆盖，环境变量优先级更高。
       </p>
     </div>
+    <div class="set-body hidden" id="set-pane-asr">
+      <p class="asr-machine" id="asr-machine">读取硬件信息…</p>
+      <label class="field">
+        <span>模型目录</span>
+        <div class="field-row">
+          <input id="asr-dir" type="text" spellcheck="false" placeholder="默认：程序目录\models">
+          <button id="asr-dir-browse" class="btn ghost small" type="button">浏览…</button>
+          <button id="asr-dir-open" class="btn ghost small" type="button">打开</button>
+        </div>
+        <span class="field-note" id="asr-dir-note"></span>
+      </label>
+      <div class="field-row">
+        <label class="field compact">
+          <span>下载源</span>
+          <select id="asr-endpoint">
+            <option value="mirror">国内镜像 hf-mirror.com（推荐）</option>
+            <option value="official">HuggingFace 官方</option>
+            <option value="custom">自定义</option>
+          </select>
+        </label>
+        <label class="field compact">
+          <span>代理（可选）</span>
+          <input id="asr-proxy" type="text" spellcheck="false" placeholder="http://127.0.0.1:7890">
+        </label>
+      </div>
+      <label class="field compact hidden" id="asr-custom-wrap">
+        <span>自定义下载源</span>
+        <input id="asr-custom-endpoint" type="text" spellcheck="false" placeholder="https://…">
+      </label>
+      <label class="field compact">
+        <span>转写设备</span>
+        <select id="asr-device">
+          <option value="auto">自动（CUDA 可用就用 GPU，否则 CPU）</option>
+          <option value="cpu">只用 CPU</option>
+          <option value="cuda">只用 GPU（不可用会报错）</option>
+        </select>
+      </label>
+      <h4 class="onboard-title">模型列表</h4>
+      <p class="hint onboard-tip">模型不会自动下载；点「下载」才联网。红色＝配置不足，不推荐。</p>
+      <div class="asr-models" id="asr-models"></div>
+      <p class="set-msg" id="asr-msg"></p>
+      <div class="set-actions">
+        <a class="btn ghost small" href="/api/asr/diagnostics" target="_blank">诊断信息</a>
+        <button id="asr-save" class="btn primary" type="button">保存这些设置</button>
+      </div>
+      <p class="hint">
+        模型目录可放在任意可写磁盘（例如 <code>D:\bili-note-models</code>）。改目录不会自动搬旧模型，
+        旧目录里的模型仍会显示「未下载」。
+      </p>
+    </div>
   </div>
 </div>
 
-<script src="/static/app.js?v=12"></script>
+<script src="/static/app.js?v=13"></script>
 </body>
 </html>

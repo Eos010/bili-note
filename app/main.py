@@ -1,9 +1,12 @@
 """bili-note：B站链接 → 视频 + 带时间戳文字稿 + 字幕。FastAPI 应用入口。"""
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
 import mimetypes
 import os
+import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -13,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import __version__ as APP_VERSION
+from . import app_paths, hardware, models
 from . import config as app_config
 from . import library
 from . import summarizer
@@ -20,7 +24,7 @@ from . import sumjobs
 from . import summary_store
 from .tasks import TaskManager, OUTPUT_DIR, media_path, plan_delete_files
 
-STATIC_DIR = Path(__file__).parent / "static"
+STATIC_DIR = app_paths.STATIC_DIR
 
 
 class SubmitBody(BaseModel):
@@ -28,7 +32,7 @@ class SubmitBody(BaseModel):
     files: list[str] = []
     download: bool = True
     transcribe: bool = True
-    model: str = "large-v3"
+    model: str = ""
 
 
 class SummarizeBody(BaseModel):
@@ -42,15 +46,43 @@ class SummarizeBody(BaseModel):
 class SettingsBody(BaseModel):
     llm: dict = {}
     summarize: dict = {}
+    transcribe: dict = {}
+    models: dict = {}
+    ui: dict = {}
+
+
+class AsrSettingsBody(BaseModel):
+    model: str | None = None
+    dir: str | None = None
+    endpoint: str | None = None
+    custom_endpoint: str | None = None
+    proxy: str | None = None
+    device: str | None = None
+    onboarded: bool | None = None
+
+
+class AsrDownloadBody(BaseModel):
+    model: str = ""
 
 
 manager = TaskManager()
 summaries = sumjobs.manager
 
 
+async def _warm_hardware() -> None:
+    try:
+        await asyncio.to_thread(hardware.profile)
+    except Exception:  # noqa: BLE001 —— 探测失败不该影响服务启动，状态页会再试
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    app_paths.ensure_dir(Path(OUTPUT_DIR))
+    app_paths.ensure_dir(app_paths.DATA_DIR)
     await manager.start()
+    # 硬件探测会起子进程问 CUDA，提前在后台热一下，首次打开向导不用等。
+    asyncio.create_task(_warm_hardware())
     try:
         yield
     finally:
@@ -65,7 +97,7 @@ app = FastAPI(title="bili-note", version=APP_VERSION, lifespan=lifespan)
 @app.get("/api/version")
 def get_version():
     """版本号只有 `app/__init__.py` 一处定义，前端顶栏来这儿取（避免文档/界面各写一份对不上）。"""
-    return {"version": APP_VERSION}
+    return {"version": APP_VERSION, "name": "bili-note"}
 
 
 @app.get("/")
@@ -79,7 +111,14 @@ async def submit(body: SubmitBody):
         raise HTTPException(400, "请粘贴链接或本地文件路径")
     if not body.download and not body.transcribe:
         raise HTTPException(400, "下载和转写至少开启一个")
-    ids = await manager.submit(body.urls, body.files, body.download, body.transcribe, body.model)
+    try:
+        ids = await manager.submit(body.urls, body.files, body.download, body.transcribe, body.model)
+    except models.ModelNotReady as e:
+        raise HTTPException(400, detail={
+            "code": "asr_model_missing",
+            "model": body.model or models.current_model(),
+            "message": str(e),
+        }) from e
     return {"task_ids": ids}
 
 
@@ -123,11 +162,12 @@ async def cancel_task(task_id: str):
 @app.post("/api/tasks/{task_id}/retry")
 async def retry_task(task_id: str):
     """失败/取消的任务：原样重跑（不用重新粘链接）。"""
-    if manager.get(task_id) is None:
+    t = manager.get(task_id)
+    if t is None:
         raise HTTPException(404, "任务不存在")
     ok = await manager.retry(task_id)
     if not ok:
-        raise HTTPException(400, "只能重试已失败或已取消的任务")
+        raise HTTPException(400, t.error or "只能重试已失败或已取消的任务")
     return {"ok": True}
 
 
@@ -384,7 +424,11 @@ def get_settings():
 
 @app.post("/api/settings")
 def save_settings(body: SettingsBody):
-    app_config.save({"llm": body.llm, "summarize": body.summarize})
+    app_config.save({
+        "llm": body.llm, "summarize": body.summarize,
+        "transcribe": body.transcribe, "models": body.models, "ui": body.ui,
+    })
+    hardware.invalidate()
     return app_config.public()
 
 
@@ -398,10 +442,237 @@ async def get_models():
     """测试连接并列出可用模型（设置面板用）。"""
     cfg = app_config.load()
     try:
-        models = await summarizer.fetch_models(cfg)
+        result = await summarizer.fetch_models(cfg)
     except summarizer.SummarizeError as e:
         raise HTTPException(400, str(e)) from e
-    return {"models": models}
+    return {"models": result}
+
+
+# ---------------------------------------------------------------- 转写模型（V3）
+#
+# 这一组刻意不叫 `/api/models`：那个口子已经表示「LLM 可用模型列表」，
+# 两个东西同名会让前端和读代码的人都分不清。ASR = 语音识别。
+
+
+def _asr_status(refresh: bool = False) -> dict:
+    prof = hardware.profile(refresh=refresh)
+    cfg = app_config.load()
+    transcribe = cfg.get("transcribe") or {}
+    model_name = models.current_model()
+    return {
+        "version": APP_VERSION,
+        "machine": {
+            "label": hardware.machine_note(prof),
+            "os": prof["platform"]["os"],
+            "cpu_cores": prof["cpu"]["cores"],
+            "ram_gb": prof["ram_gb"],
+            "gpu": prof["gpu"],
+            "cuda": prof["cuda"],
+            "ffmpeg": prof["ffmpeg"],
+            "frozen": prof["platform"]["frozen"],
+            "python": prof["platform"]["python"],
+        },
+        "models_dir": prof["models_dir"],
+        "endpoint": models.endpoint_url(),
+        "endpoint_label": models.endpoint_label(),
+        "proxy": models.proxy_url(),
+        "current_model": model_name,
+        "device": transcribe.get("device") or "auto",
+        "cpu_threads": transcribe.get("cpu_threads") or 0,
+        "beam_size": transcribe.get("beam_size") or 5,
+        "onboarded": bool((cfg.get("ui") or {}).get("onboarded")),
+        "needs_model": not models.is_installed(model_name),
+        "download": models.downloads.status(),
+        "models": models.status_rows(prof),
+    }
+
+
+@app.get("/api/asr/status")
+def asr_status(refresh: bool = False):
+    return _asr_status(refresh=refresh)
+
+
+@app.get("/api/asr/download")
+def asr_download_status():
+    return models.downloads.status()
+
+
+@app.post("/api/asr/download")
+def asr_download(body: AsrDownloadBody):
+    name = (body.model or "").strip()
+    if name not in models.BY_NAME:
+        raise HTTPException(400, "没有这个转写模型")
+    ok, message = models.downloads.start(name)
+    if not ok:
+        # 已有作业在跑是 409（客户端可以理解为"等它"），其余是 400
+        raise HTTPException(409 if "已经有一个" in message else 400, message)
+    return {"ok": True, "job": models.downloads.status()}
+
+
+@app.post("/api/asr/download/cancel")
+def asr_download_cancel():
+    if not models.downloads.cancel():
+        raise HTTPException(400, "当前没有正在下载的模型")
+    return {"ok": True}
+
+
+def _check_models_dir(raw: str) -> str:
+    path = Path(os.path.expandvars(os.path.expanduser(raw.strip())))
+    if not path.is_absolute():
+        raise HTTPException(400, "模型目录请填绝对路径（例如 D:\\bili-note-models）")
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise HTTPException(400, f"目录不可用：{e}") from e
+    if not path.is_dir():
+        raise HTTPException(400, "这不是一个目录")
+    test = path / f".bili-note-write-test-{os.getpid()}"
+    try:
+        test.write_text("ok", encoding="utf-8")
+        test.unlink()
+    except OSError as e:
+        raise HTTPException(400, f"这个目录没有写权限：{e}") from e
+    return str(path.resolve())
+
+
+def _pick_folder() -> str:
+    """服务端弹 Windows 原生文件夹选择框（前端拿不到本机路径）。"""
+    if os.name != "nt":
+        raise HTTPException(400, "当前平台不支持选择目录，请手动填写路径")
+    if os.environ.get("BILI_NOTE_DISABLE_DIALOG") == "1":
+        raise HTTPException(400, "当前环境已禁用目录选择框，请手动填写路径")
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms;"
+        "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
+        "$d.Description = '选择 bili-note 模型目录';"
+        "$d.ShowNewFolderButton = $true;"
+        "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {"
+        "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($d.SelectedPath))"
+        "}"
+    )
+    try:
+        p = subprocess.run(
+            ["powershell", "-NoProfile", "-STA", "-WindowStyle", "Hidden", "-Command", script],
+            capture_output=True, text=True, timeout=300,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise HTTPException(400, f"打开目录选择框失败：{e}") from e
+    lines = [ln.strip() for ln in (p.stdout or "").splitlines() if ln.strip()]
+    if not lines:
+        raise HTTPException(400, "已取消选择目录")
+    try:
+        return base64.b64decode(lines[-1]).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return lines[-1]
+
+
+@app.post("/api/asr/settings")
+def asr_settings(body: AsrSettingsBody):
+    patch: dict = {"transcribe": {}, "models": {}, "ui": {}}
+
+    if body.model is not None:
+        if body.model not in models.BY_NAME:
+            raise HTTPException(400, "没有这个转写模型")
+        patch["transcribe"]["model"] = body.model
+    if body.device is not None:
+        if body.device not in ("auto", "cpu", "cuda"):
+            raise HTTPException(400, "device 只能是 auto / cpu / cuda")
+        patch["transcribe"]["device"] = body.device
+    if body.dir is not None:
+        state = models.downloads.status()
+        if state.get("state") in ("running", "verifying", "cancelling"):
+            raise HTTPException(409, "模型正在下载，下载完再改目录（否则下到一半换目标）")
+        patch["models"]["dir"] = _check_models_dir(body.dir) if body.dir.strip() else ""
+    if body.endpoint is not None:
+        if body.endpoint not in ("mirror", "official", "custom"):
+            raise HTTPException(400, "endpoint 只能是 mirror / official / custom")
+        patch["models"]["endpoint"] = body.endpoint
+    if body.custom_endpoint is not None:
+        value = body.custom_endpoint.strip()
+        if value and not value.startswith(("http://", "https://")):
+            raise HTTPException(400, "自定义下载源必须是 http(s) 地址")
+        patch["models"]["custom_endpoint"] = value.rstrip("/")
+    # 选了 custom 却没地址 → 不要静默回退镜像，用户会以为在用自定义源
+    if body.endpoint == "custom":
+        current = app_config.load().get("models") or {}
+        custom = (body.custom_endpoint if body.custom_endpoint is not None
+                  else current.get("custom_endpoint") or "").strip()
+        if not custom:
+            raise HTTPException(400, "选了自定义下载源，请把地址填上")
+    if body.proxy is not None:
+        value = body.proxy.strip()
+        if value and not value.startswith(("http://", "https://", "socks5://")):
+            raise HTTPException(400, "代理地址要写成 http://127.0.0.1:7890 这样")
+        patch["models"]["proxy"] = value
+    if body.onboarded is not None:
+        patch["ui"]["onboarded"] = bool(body.onboarded)
+
+    app_config.save(patch)
+    hardware.invalidate()
+    return _asr_status(refresh=True)
+
+
+@app.post("/api/asr/pick-dir")
+def asr_pick_dir():
+    return {"path": _pick_folder()}
+
+
+@app.post("/api/asr/open-dir")
+def asr_open_dir():
+    target = app_paths.models_dir()
+    try:
+        app_paths.ensure_dir(target)
+    except OSError as e:
+        raise HTTPException(400, f"模型目录不可用：{e}") from e
+    _open_in_explorer(str(target))
+    return {"ok": True, "path": str(target)}
+
+
+@app.delete("/api/asr/models/{name}")
+def asr_delete_model(name: str):
+    if name not in models.BY_NAME:
+        raise HTTPException(404, "没有这个转写模型")
+    active = [
+        t for t in manager.list_all()
+        if t.model == name and t.status in ("queued", "resolving", "downloading", "transcribing")
+    ]
+    if active:
+        raise HTTPException(400, "还有任务在用这个模型，等它们跑完再删")
+    result = models.remove(name)
+    if not result.get("ok"):
+        raise HTTPException(400, detail=result)
+    hardware.invalidate()
+    return result
+
+
+@app.get("/api/asr/diagnostics")
+def asr_diagnostics():
+    """给朋友排障用的一段纯文本：复制粘贴就能看出环境哪里不对。"""
+    prof = hardware.profile(refresh=True)
+    cfg = app_config.load()
+    rows = models.status_rows(prof)
+    lines = [
+        f"bili-note {APP_VERSION}",
+        f"OS: {prof['platform']['os']}",
+        f"Python: {prof['platform']['python']}  frozen={prof['platform']['frozen']}",
+        f"CPU: {prof['cpu']['cores']} 核 / RAM {prof['ram_gb']}GB",
+        f"GPU: {prof['gpu'].get('name') or '无'} / {prof['gpu'].get('vram_mb') or 0}MB / driver {prof['gpu'].get('driver') or '-'}",
+        f"CUDA: {prof['cuda']['available']} {prof['cuda'].get('reason') or ''}".rstrip(),
+        f"ffmpeg: {prof['ffmpeg'].get('version') or prof['ffmpeg'].get('error') or '无'}",
+        f"模型目录: {prof['models_dir']['path']}（剩余 {prof['models_dir']['free_gb']}GB，可写={prof['models_dir']['writable']}）",
+        f"下载源: {models.endpoint_label()}  代理: {models.proxy_url() or '无'}",
+        f"当前模型: {models.current_model()}  设备: {cfg['transcribe'].get('device')}",
+        "",
+        "模型状态:",
+    ]
+    for row in rows:
+        mark = "已下载" if row["downloaded"] else "未下载"
+        legacy = "（旧缓存）" if row["legacy"] else ""
+        lines.append(
+            f"- {row['name']}: {mark}{legacy}  {row['size_gb']}GB  "
+            f"{row['recommend']['level']} {row['recommend']['text']} — {row['recommend']['reason']}"
+        )
+    return PlainTextResponse("\n".join(lines))
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

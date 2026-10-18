@@ -6,7 +6,13 @@
 
 - 粘贴 B 站链接（支持批量，每行一个），两个独立开关：
   - **下载视频**：默认 1080P，无则取该视频最高可用
-  - **转写文字稿**：`large-v3`（默认）/ `large-v3-turbo` 下拉切换，GPU 优先、CPU 兜底
+  - **转写文字稿**：模型在应用内选择/下载（默认 `small`，CPU 可跑），GPU 自动检测、不可用时回退 CPU
+- **一开始不下载任何模型**：安装/首次启动都不会偷偷拉几个 G。
+  首次向导先检测显卡/CUDA/ffmpeg/磁盘，再按配置给每个模型标**绿色「推荐下载」/ 红色「配置不足，不推荐」**；
+  只有你点「下载」才联网。模型目录可在设置里改，下载、加载、删除只认这一个绝对路径
+- **模型中心**：`small`（464MB，CPU 默认）/ `base` / `tiny` / `medium` / `large-v3-turbo` / `large-v3`；
+  支持国内镜像（默认 `hf-mirror.com`）/ 官方源 / 自定义源 / 代理；断点续传、取消、sha256 校验；
+  旧版 `models/hub` 缓存会被识别为「旧缓存」直接可用，不要求重下
 - **本地视频/音频转写**：切到「本地转写」粘贴文件路径（每行一个），跳过下载直接转写，`.txt`/`.srt` 保存在原视频同目录
   - 粘 **`.txt` 文稿路径**会跳过转写、直接生成一个可总结的任务（对已有文稿做总结不用重新转写）
 - 每个视频一个目录，输出 `.mp4` + `.txt`（带时间戳全文稿）+ `.srt`（可挂字幕）
@@ -72,35 +78,68 @@
 
 ## 环境要求
 
+**便携版（推荐给普通用户）**：Windows 10/11 x64，**不需要 Python / Git / pip**。
+解压后双击 `bili-note.exe` 即可；ffmpeg 已随包，模型按需下载。
+
+**源码/开发路径**：
 - Windows 10/11
-- Python 3.10+（开发环境为 3.12）
-- ffmpeg（用于音视频合并；WinGet 安装的版本可被自动发现）
-- 转写推荐 NVIDIA GPU（Blackwell / CUDA 12.8+），无 GPU 时自动回退 CPU
+- Python 3.10–3.12（开发环境为 3.12）
+- ffmpeg（`install.bat` 会尝试从 PATH / WinGet / gyan.dev 准备好）
+- 转写推荐 NVIDIA GPU；没有 GPU 时自动走 CPU（`small` 可用，`large-v3` 不推荐）
 
 ## 安装
 
-```bash
-# 1. 创建虚拟环境（任选其一）
-python -m venv .venv
-.venv\Scripts\activate
+### 普通用户：便携版（无需命令行）
 
-# 2. 安装依赖
-pip install -r requirements.txt
+1. 下载 `bili-note-v3-portable-win64.zip`（GitHub Releases）；
+2. **解压到可写目录**，例如 `D:\bili-note`（不要放 `C:\Program Files`，
+   程序要把 `config.json` / `output/` / `models/` 写在 exe 旁边）；
+3. 双击 `bili-note.exe`；
+4. 首次向导里选模型：想先体验就下载 `small`（约 464MB），或者点「先不下载，仅下载视频」。
+
+> 为什么是便携包而不是传统安装器：这个程序的数据（模型、视频、文稿）就在程序旁边，
+> 装到 Program Files 反而会因为没有写权限而失败。解压即用、删除即卸载，路径最不容易出错。
+
+### 开发者/源码
+
+```bash
+git clone https://github.com/Eos010/bili-note.git
+cd bili-note
+install.bat          # 一键：Python 检测/安装、venv、pip（清华镜像）、ffmpeg、GPU 运行库
+start.bat            # 启动（自动开浏览器）
 ```
 
-若 ffmpeg 不在 PATH，项目会自动在 WinGet 包目录中查找；否则需手动安装 ffmpeg 并加入 PATH。
+`install.bat` **不会下载模型**：模型在界面里由你自己选、自己点。
+更新：`update.bat`（工作区有改动会拒绝 pull，避免覆盖你的修改）。
 
 ## 使用
 
-```bash
-python run.py
-```
+双击 `start.bat` / `bili-note.exe` 后，浏览器会打开 `http://127.0.0.1:8001`
+（8001 被别的程序占用时自动换 8002…，并打开正确地址）。粘贴链接 → 选开关 → 点「开始」。
 
-服务启动后自动打开浏览器 `http://127.0.0.1:8001`。粘贴链接 → 选开关 → 点「开始」。
-
-如果由别的常驻入口托管，可设 `BILI_NOTE_NO_BROWSER=1`（或传 `--no-browser`）禁止自动弹浏览器。
+- **首次向导**：环境检查 + 模型选择；跳过也不影响「仅下载视频」。
+- **设置 → 转写模型**：模型目录（可改绝对路径）、下载源、代理、CPU/GPU/自动、模型下载/删除、诊断信息。
+- 如果由别的常驻入口托管，可设 `BILI_NOTE_NO_BROWSER=1`（或传 `--no-browser`）禁止自动弹浏览器；
+  `BILI_NOTE_PORT` 可指定端口。
 
 输出目录：`output/<视频标题>/`。仅转写时临时音频用完即删。
+
+## 模型与磁盘
+
+| 模型 | 体积 | 建议 | 说明 |
+|---|---|---|---|
+| tiny | 76MB | 低配兜底 | 极快，质量低 |
+| base | 142MB | 低配备选 | 快，质量一般 |
+| **small** | **464MB** | **CPU 默认** | 质量和速度平衡 |
+| medium | 1.46GB | 4GB+ 显存 | CPU 偏慢 |
+| large-v3-turbo | 1.55GB | 6GB+ 显存 | 质量约 large-v3 的 99%，更快 |
+| large-v3 | 2.95GB | 8GB+ 显存 | 质量最高 |
+
+- 默认模型目录：便携版 = `<解压目录>\models`；源码版 = `<仓库>\models`。
+  设置里可改成任意可写磁盘，保存后下载/加载/删除都只认这个目录（不再依赖 `HF_HOME`）。
+- 默认下载源：`hf-mirror.com`（国内直连友好）；可切官方或自定义，支持 HTTP 代理。
+- 下载中断会保留 `.part`，再点下载续传；LFS 文件按清单里的 sha256 校验。
+- 旧版 `models/hub/models--.../snapshots/...` 会被识别为「旧缓存」直接使用，不会自动移动/删除。
 
 ## 配置 AI 总结（只需一次）
 
@@ -127,16 +166,19 @@ python run.py
 .venv\Scripts\python.exe selftest_cancel.py  # 取消/删除/报错（含慢速本地源，64 项）
 .venv\Scripts\python.exe selftest_longdoc.py # 长稿流程（假 LLM：长度评估/骨架/分节/断点续传，76 项）
 .venv\Scripts\python.exe selftest_bgsum.py   # 后台总结作业（假 LLM：断连/重连/并发/停止，68 项）
+.venv\Scripts\python.exe selftest_models.py  # V3 模型中心（本地假 HF 源：清单/下载/续传/取消/校验/接口，85 项）
 ```
 
-合计 **365 项**。`selftest_e2e.py`、`selftest_longdoc.py`、`selftest_bgsum.py` 会临时移走你的
-`config.json`（旁边留 `.selftest-backup` 可恢复），跑完自动放回。
+合计 **450 项**。`selftest_e2e.py`、`selftest_longdoc.py`、`selftest_bgsum.py` 会临时移走你的
+`config.json`（旁边留 `.selftest-backup` 可恢复），跑完自动放回；
+`selftest_models.py` 用 `.selftest-tmp/` 作数据目录，不碰真实配置/输出/模型。
 
 界面交互另有一个**真浏览器**量具（Node 原生 + CDP，零 npm 依赖，只点「预览文稿」「查看总结」这类
 只读按钮，不写盘、不起总结作业）：
 
 ```bash
 node .verify\library_ui_check.mjs      # 16 项；截图落 .verify\shots\
+node .verify\model_ui_check.mjs        # 22 项；首次向导/模型下拉/转写模型设置（不下载模型）
 ```
 
 > 为什么 Python 自检之外还要它：Python 打的是 HTTP 层，而**"点按钮有没有反应"只有真浏览器能证**。
@@ -154,34 +196,57 @@ node .verify\library_ui_check.mjs      # 16 项；截图落 .verify\shots\
 .venv\Scripts\python.exe _ab_longdoc.py <文稿.txt> <输出前缀>   # 走完整长稿流程，出质量报告
 ```
 
+## 构建便携包（维护者）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_portable.ps1
+# 可选：CPU 轻量包（不含 cublas，体积小很多）
+powershell -ExecutionPolicy Bypass -File scripts\build_portable.ps1 -NoCuda
+```
+
+产出：`release\bili-note-v3-portable-win64.zip`（或 `...-cpu-win64.zip`）。
+构建脚本会：装 PyInstaller → 准备 `tools\ffmpeg` → 收集 `app/static` 与原生依赖 →
+**用构建出来的 exe 自己跑一次 `--probe-cuda` 和真实 HTTP 健康检查** → 打 zip。
+不会把 `config.json` / `output/` / `models/` 打进包。
+
 ## 项目结构
 
 ```
 bili-note/
-├── run.py               # 启动入口（自动开浏览器）
-├── selftest.py          # 离线自检（合并/提示词/边界）
-├── selftest_library.py  # 已有文稿自动检索自检（扫描规则 + 只读接口边界）
-├── selftest_e2e.py      # 端到端自检（假 LLM，不花钱）
-├── selftest_cancel.py   # 取消/删除/报错自检
-├── selftest_longdoc.py  # 长稿流程自检（假 LLM，不花钱）
-├── selftest_bgsum.py    # 后台总结作业自检（假 LLM；起真端口 8096，因为要测真断连）
-├── _ab_test.py          # 实跑单趟模板 A + 质量报告（改提示词时用）
-├── _ab_longdoc.py       # 实跑长稿流程 + 质量报告
-├── requirements.txt
-├── config.json          # 本地配置（含 API Key，git 忽略）
+├── run.py               # 启动入口：端口选择 / 单实例 / --probe-cuda / 自动开浏览器
+├── install.bat          # 源码一键安装（Python/venv/pip/ffmpeg/GPU 运行库；不下模型）
+├── update.bat           # 源码更新（工作区脏就拒绝）
+├── start.bat / stop.bat # 源码启动/停止（stop 走 instance.json，不再按端口猜）
+├── download-model.bat   # 命令行预下载模型（和界面同一条下载路径）
+├── bili-note.spec       # PyInstaller onedir 规格
+├── PORTABLE-README.txt  # 便携包里的使用说明
+├── config.example.json  # 无 Key 的配置模板
+├── requirements-gpu.txt # NVIDIA cublas（可选）
+├── requirements-build.txt
 ├── app/
 │   ├── main.py          # FastAPI 应用 + API + SSE 接线
+│   ├── app_paths.py     # 程序根/数据目录/模型目录的唯一解析处（冻结态也认）
+│   ├── cuda_bootstrap.py# import ctranslate2 前修好 CUDA DLL 搜索路径
+│   ├── hardware.py      # 显卡/CUDA/ffmpeg/磁盘探测 + 人话结论
+│   ├── models.py        # 模型清单/路径解析/旧缓存兼容/下载与校验
+│   ├── probe.py         # CUDA 子进程探针（坏驱动不会带崩主服务）
 │   ├── tasks.py         # 任务管理器（单 worker 串行队列）
 │   ├── downloader.py    # yt-dlp 封装：解析/下载/音频
-│   ├── transcriber.py   # faster-whisper 封装：txt + srt
+│   ├── transcriber.py   # faster-whisper 封装：只从模型目录加载，设备策略
 │   ├── summarizer.py    # 文稿合并 + 提示词模板 + LLM 流式调用 + 长度策略
-│   ├── longdoc.py       # 长稿流程：长度评估 → 骨架 → 逐节展开 → 断点续传
-│   ├── sumjobs.py       # 后台总结作业：脱离 HTTP 运行的 task + 事件流水/回放 + 并发闸门
-│   ├── summary_store.py # 总结产物的路径与读写（全项目唯一定义处）
-│   ├── library.py       # 已有文稿自动检索：扫 output/、格式校验、id 映射（前端只拿 id 不拿路径）
-│   ├── quality.py       # 质量量具：锚点覆盖率 / 段落召回 / 引号保真（不用 LLM 裁判）
+│   ├── longdoc.py       # 长稿流程
+│   ├── sumjobs.py       # 后台总结作业
+│   ├── summary_store.py # 总结产物路径与读写
+│   ├── library.py       # 已有文稿自动检索
+│   ├── quality.py       # 质量量具
 │   ├── config.py        # 配置读写（Key 打码、白名单、环境变量优先）
 │   └── static/          # 原生 HTML/CSS/JS 前端
+├── scripts/
+│   ├── install.ps1      # install.bat 的真实逻辑
+│   ├── update.ps1
+│   ├── stop.ps1         # 校验 PID 后再停，避免 instance.json 过期误杀
+│   └── build_portable.ps1 # 打便携 zip（-NoCuda 出 CPU 轻量包）
+├── selftest*.py         # 7 套自检（含新增 selftest_models.py）
 └── output/              # 产物（git 忽略）
 ```
 
@@ -197,7 +262,25 @@ bili-note/
 
 ## 版本线
 
-- **v2.1（当前）· 后台总结作业** —— **相对 v2.0 只多了这一件事：总结从"那根连接"里拆出来变成后台作业。**
+- **V3（当前）· 安装方式 + 转写模型管理重构** —— 一句话：**让没有 Python 基础的人也能装上，
+  并且模型默认不下载、下到哪由程序唯一决定。**
+  - **安装**：新增便携包（PyInstaller onedir，内置 ffmpeg + Python 运行时，免 Python/Git/pip），
+    解压即用；源码路径补 `install.bat` / `update.bat` / 新的 `start.bat` / `stop.bat`。
+  - **首次向导**：环境检查（OS/CPU/内存/GPU/显存/CUDA/ffmpeg/磁盘/模型目录）+ 模型卡片；
+    绿色「推荐下载」/ 红色「配置不足，不推荐」；模型**只有点下载才联网**。
+  - **模型中心**：统一目录（`app/app_paths.py` 唯一解析）、自有布局 `<models_dir>/<模型名>/`、
+    绝对路径直接交给 `WhisperModel`；默认源 `hf-mirror.com`，可切官方/自定义/代理；
+    `.part` 续传、取消、sha256 校验、磁盘预检；旧 `models/hub` 缓存只读兼容。
+  - **默认模型 `small`（464MB，CPU 可跑）**；`device=auto`（CUDA 探测通过才用 GPU，失败回退 CPU 并显示原因）。
+    **运行期不再静默下载模型**：模型缺失 → `ModelNotReady` + 可照做的中文提示。
+  - **启动器**：端口 8001–8010 自动选择、单实例检测、`instance.json` 给 stop 用、
+    `--probe-cuda` 子进程探针；数据/模型路径在界面上都可见。
+  - 新增 `app/app_paths.py`、`app/hardware.py`、`app/models.py`、`app/probe.py`、
+    `app/cuda_bootstrap.py`、`selftest_models.py`、`.verify/model_ui_check.mjs`、
+    `build_portable.ps1` / `bili-note.spec`。
+  - **修掉的旧问题**：`HF_HOME` 只在 `start.bat` 设置导致模型下到 C 盘缓存；首次转写静默拉 3GB；
+    端口占用误判「已运行」；全新 venv 缺 cublas 导致 GPU 静默退化。
+- **v2.1 · 后台总结作业** —— **相对 v2.0 只多了这一件事：总结从"那根连接"里拆出来变成后台作业。**
   其余（界面、长稿流程、模板、产物格式）与 v2.0 一致。
   - **病根**：v1.3 起，生成循环就跑在 `POST /summarize` 的响应生成器里，于是"关掉弹窗"= "取消任务"；
     前端的 `sumStreaming` 是全局单标志，第二个视频开不了；卡片上没有进度。**三件事一个根因**
@@ -243,8 +326,26 @@ bili-note/
 > （背景：v2.0 这个号原本留给弹幕导出、v2.1 留给登录态 cookie，结果两次都被别的东西占了。
 > 预留号 = 必然漂移，所以这个做法本身取消了。）
 
+## 常见问题（V3 安装/模型）
+
+| 现象 | 处理 |
+|---|---|
+| 解压后双击没反应 / 提示没有写权限 | 不要放 `Program Files`；解压到 `D:\bili-note` 这类可写目录 |
+| 想用 GPU，但向导显示红色 / CPU | 「设置 → 转写模型」看 CUDA 原因；源码版重跑 `install.bat`（会装 cublas）；便携包若提示缺运行库，用 CPU 或换 GPU 完整包 |
+| 模型下载很慢 | 设置里把下载源切到「国内镜像 hf-mirror.com」；仍慢可填代理（如 `http://127.0.0.1:7890`） |
+| 下载到一半断了 | 已下载部分保留，再点「下载」会续传；不用从头来 |
+| 模型明明下过却显示未下载 | 看「设置 → 转写模型」里的模型目录；改过目录后旧目录的模型不会自动搬过去。旧版 `models/hub` 会显示「旧缓存」 |
+| 端口 8001 被占用 | 程序会自动用 8002… 并打开正确地址；不要手动改浏览器地址 |
+| 杀毒/SmartScreen 拦截 | 未签名 exe 的正常提示：更多信息 → 仍要运行；不要用 onefile 版（本项目用 onedir） |
+| 只想先存视频 | 首次向导点「先不下载，仅下载视频」，或关掉「转写文字稿」开关 |
+| 粘 `.txt` 文稿做总结 | 不需要转写模型（跳过转写，直接生成可总结任务） |
+| 想换模型目录 | 设置里填绝对路径 → 保存；之后下载/加载/删除都只认新目录 |
+| 想彻底卸载 | 删除整个程序文件夹即可；`models/` 和 `output/` 都在里面，想保留先拷走 |
+
 ## 说明
 
+- **完整便携包**内含 ffmpeg 与 NVIDIA cublas/cuDNN 运行库（只用于本地推理）；
+  **CPU 轻量包**不含 cublas，检测到显卡也会明确显示「CUDA 不可用，将用 CPU」。
 - 下载与转写的产物仅供**个人学习与研究**使用，请尊重视频作者版权，勿用于商业用途或二次分发。
 - 总结默认对接 DeepSeek 官方接口（OpenAI 兼容），可在设置里换成任意兼容服务。
 - `config.json` 含 API Key，已在 `.gitignore` 中，**提交前请确认它没有被纳入版本控制**。

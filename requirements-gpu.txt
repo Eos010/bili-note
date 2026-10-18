@@ -1,0 +1,8 @@
+# NVIDIA GPU 运行库（可选）
+#
+# 为什么需要它：ctranslate2 的 wheel 不带 cublas64_12.dll / cublasLt64_12.dll。
+# `install.ps1` 检测到 nvidia-smi 时会装这个包，并把 nvidia\cublas\bin 里的 DLL
+# 复制进 site-packages\ctranslate2\（旧版是手工复制，换机器就复现不了）。
+#
+# 没有 NVIDIA 显卡的用户不需要装这个文件。
+nvidia-cublas-cu12>=12.4,<13

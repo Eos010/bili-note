@@ -8,10 +8,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
-from . import downloader, summary_store, transcriber
+from . import app_paths, downloader, models, summary_store, transcriber
 from .errors import CancelledError, explain
 
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "output")
+OUTPUT_DIR = str(app_paths.OUTPUT_DIR)
 
 # 本地文件转写支持的媒体扩展名（交给 faster-whisper/PyAV 解码）
 _MEDIA_EXTS = {
@@ -54,6 +54,36 @@ def _is_local_path(s: str) -> bool:
     if len(s) >= 2 and s[0].isalpha() and s[1] == ":":
         return True
     return s.startswith("\\\\") or s.startswith("/") or s.startswith("\\")
+
+
+def requires_model(urls: list[str], files: list[str], transcribe: bool) -> bool:
+    """这批输入**是否真的需要转写模型**。
+
+    - 远程 URL + 开转写 → 需要；
+    - 本地媒体路径（不管粘在链接框还是本地框）→ 需要（本地媒体总是转写）；
+    - 本地 `.txt` → 不需要（跳过转写，直接生成可总结任务）；
+    - 只下载视频 → 不需要。
+
+    这条规则只在这里定义一次，`TaskManager.submit` 和 HTTP 层都用它。
+    """
+    for raw in urls:
+        u = (raw or "").strip()
+        if not u:
+            continue
+        if _is_local_path(u):
+            # 粘在链接框里的本地路径也按本地文件处理，和 `_process` 的分支保持一致
+            if os.path.splitext(u)[1].lower() == ".txt":
+                continue
+            return True
+        if transcribe:
+            return True
+    for f in files:
+        f = (f or "").strip()
+        if not f:
+            continue
+        if os.path.splitext(f)[1].lower() != ".txt":
+            return True
+    return False
 
 
 # ---------------------------------------------------------------- 删除产物
@@ -181,6 +211,9 @@ class Task:
     video_path: str = ""
     txt_path: str = ""
     srt_path: str = ""
+    device: str = ""
+    device_note: str = ""
+    _note_shown: bool = False
     error: str = ""
     cancel_requested: bool = False
     created_at: float = field(default_factory=time.time)
@@ -211,6 +244,8 @@ class Task:
             "video_path": self.video_path,
             "txt_path": self.txt_path,
             "srt_path": self.srt_path,
+            "device": self.device,
+            "device_note": self.device_note,
             "error": self.error,
             "cancellable": self.cancellable,
         }
@@ -226,7 +261,19 @@ class TaskManager:
         if self._worker is None:
             self._worker = asyncio.create_task(self._run())
 
-    async def submit(self, urls: list[str], files: list[str], download: bool, transcribe: bool, model: str) -> list[str]:
+    async def submit(self, urls: list[str], files: list[str], download: bool, transcribe: bool, model: str = "") -> list[str]:
+        # 模型名空 = 用配置里的默认模型。校验放在这里而不是只在 HTTP 层，
+        # 是为了让所有入口（含自检直接调 manager）走同一条规则。
+        model = (model or "").strip() or models.current_model()
+        needs_model = requires_model(urls, files, transcribe)
+        if model not in models.BY_NAME:
+            if needs_model:
+                raise models.ModelNotReady(f"没有这个转写模型：{model}")
+            # 只下载视频 / 纯 .txt 文稿：模型名无效也不该拦，落一个默认名占位即可
+            model = models.DEFAULT_MODEL
+        if needs_model:
+            models.require(model)   # 不存在 → ModelNotReady（中文、可照做）
+
         ids: list[str] = []
         for u in urls:
             u = _clean(u)
@@ -269,6 +316,9 @@ class TaskManager:
         """把失败/取消的任务重置后重新排队（沿用原来的链接、开关、模型）。"""
         t = self.tasks.get(task_id)
         if t is None or t.status not in ("error", "cancelled"):
+            return False
+        if t.transcribe and not models.is_installed(t.model):
+            t.error = str(models.require(t.model))   # 立即给可照做的原因，不排进队列空转
             return False
         t.status = "queued"
         t.progress = 0.0
@@ -497,7 +547,25 @@ class TaskManager:
             pct = d.get("progress", 0.0)
             t.progress = 45.0 + pct * 0.55
             device = d.get("device", "")
-            t.phase_detail = f"转写中 {pct:.0f}%（{'GPU' if device == 'cuda' else 'CPU'}）"
+            note = d.get("device_note", "") or ""
+            t.device = device
+            if note:
+                t.device_note = note
+            if d.get("phase") == "load_model":
+                t.phase_detail = note or "加载模型…"
+                if note:
+                    t.device_note = note
+                    t._note_shown = True
+                return
+            label = "GPU" if device == "cuda" else "CPU"
+            detail = f"转写中 {pct:.0f}%（{label}）"
+            # 回退原因只在第一次露一下，不要每个分片都刷一屏
+            if note and not t._note_shown:
+                detail += f" · {note[:80]}"
+                t._note_shown = True
+            if note:
+                t.device_note = note
+            t.phase_detail = detail
 
         txt_path, srt_path = await asyncio.to_thread(
             transcriber.transcribe, media_path, out_dir, base,

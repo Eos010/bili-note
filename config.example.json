@@ -1,0 +1,34 @@
+{
+  "llm": {
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "",
+    "model": "deepseek-chat",
+    "max_tokens": 8000,
+    "temperature": 0.3,
+    "timeout_read": 300,
+    "thinking_enabled": true
+  },
+  "summarize": {
+    "seg_chars": 400,
+    "seg_seconds": 180,
+    "gap_seconds": 3,
+    "with_timestamp": true,
+    "template": "A",
+    "max_concurrent": 3
+  },
+  "transcribe": {
+    "model": "small",
+    "device": "auto",
+    "cpu_threads": 0,
+    "beam_size": 5
+  },
+  "models": {
+    "dir": "",
+    "endpoint": "mirror",
+    "custom_endpoint": "",
+    "proxy": ""
+  },
+  "ui": {
+    "onboarded": false
+  }
+}

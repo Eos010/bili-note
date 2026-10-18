@@ -26,8 +26,12 @@ function switchTab(mode) {
 $("#tab-download").addEventListener("click", () => switchTab("download"));
 $("#tab-local").addEventListener("click", () => switchTab("local"));
 
-// ---------- 模型选择（展开切换） ----------
-let currentModel = "large-v3";
+// ---------- 模型选择（V3：数据驱动，具体渲染在下面的 ASR 段） ----------
+let currentModel = "small";
+let asrStatus = null;          // 最近一次 /api/asr/status 的结果
+let asrPollTimer = null;       // 模型下载轮询
+let onboardSelected = "small";
+let onboardShown = false;
 
 $("#model-picker-btn").addEventListener("click", (e) => {
   e.stopPropagation();
@@ -37,10 +41,19 @@ $("#model-picker-btn").addEventListener("click", (e) => {
 $("#model-menu").addEventListener("click", (e) => {
   const opt = e.target.closest(".model-option");
   if (!opt) return;
-  currentModel = opt.dataset.model;
-  $("#model-current-label").textContent = opt.querySelector(".model-name").textContent;
-  $("#model-menu").querySelectorAll(".model-option").forEach((o) => o.classList.toggle("active", o === opt));
   $("#model-menu").classList.add("hidden");
+  chooseModel(opt.dataset.model);
+});
+
+$("#model-banner").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-model-act]");
+  if (!btn) return;
+  if (btn.dataset.modelAct === "download") {
+    openSettings("asr");
+    flash("在「转写模型」里点下载；也可以先关掉「转写文字稿」只下载视频。");
+  } else if (btn.dataset.modelAct === "settings") {
+    openSettings("asr");
+  }
 });
 
 document.addEventListener("click", () => $("#model-menu").classList.add("hidden"));
@@ -57,9 +70,26 @@ async function postTasks(body) {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.detail || "提交失败");
+    const err = await res.json().catch(() => ({}));
+    const detail = err.detail;
+    if (detail && typeof detail === "object") {
+      // V3：模型没下载时后端回结构化 detail（code/model/message），不能再当字符串显示
+      if (detail.code === "asr_model_missing") openSettings("asr");
+      throw new Error(detail.message || detail.reason || "提交失败");
+    }
+    throw new Error(detail || "提交失败");
   }
+}
+
+// 转写前先看模型在不在。缺模型时不要等后端报错——直接把人带到下载入口。
+function modelReadyOrGuide(files) {
+  if (!asrStatus) return true;             // 状态还没读到，交给后端兜底
+  const txtOnly = files && files.length &&
+    files.every((f) => /\.txt$/i.test(String(f).trim()));
+  if (txtOnly || !asrStatus.needs_model) return true;
+  flash(`转写模型 ${asrStatus.current_model} 还没下载：先在「设置 → 转写模型」下载，或关掉「转写文字稿」只下载视频。`);
+  openSettings("asr");
+  return false;
 }
 
 $("#btn-start-download").addEventListener("click", async () => {
@@ -69,6 +99,9 @@ $("#btn-start-download").addEventListener("click", async () => {
 
   if (!urls.length) { flash("请先粘贴至少一个链接"); return; }
   if (!download && !transcribe) { flash("下载和转写至少开启一个"); return; }
+  // 链接框里粘本地路径是支持的；其中 .txt 文稿不需要转写模型
+  const txtOnly = urls.every((u) => /\.txt$/i.test(u.trim()));
+  if (transcribe && !txtOnly && !modelReadyOrGuide(null)) return;
 
   const btn = $("#btn-start-download");
   btn.disabled = true;
@@ -87,6 +120,7 @@ $("#btn-start-download").addEventListener("click", async () => {
 $("#btn-start-local").addEventListener("click", async () => {
   const files = linesOf($("#files"));
   if (!files.length) { flash("请先粘贴至少一个文件路径"); return; }
+  if (!modelReadyOrGuide(files)) return;
 
   const btn = $("#btn-start-local");
   btn.disabled = true;
@@ -415,6 +449,7 @@ document.addEventListener("keydown", (e) => {
   closeSummary();
   $("#modal").classList.add("hidden");
   $("#set-modal").classList.add("hidden");
+  $("#onboard-modal").classList.add("hidden");
   $("#confirm-modal").classList.add("hidden");
   confirmTaskId = null;
 });
@@ -1162,12 +1197,24 @@ async function seekTo(sec) {
 
 let settingsCache = null;
 
-$("#btn-settings").addEventListener("click", openSettings);
+$("#btn-settings").addEventListener("click", () => openSettings("llm"));
 $("#set-close").addEventListener("click", () => $("#set-modal").classList.add("hidden"));
 $("#set-modal").addEventListener("click", (e) => { if (e.target === $("#set-modal")) $("#set-modal").classList.add("hidden"); });
 
-async function openSettings() {
+function showSetPane(pane) {
+  const target = pane === "asr" ? "asr" : "llm";
+  document.querySelectorAll(".set-tab").forEach((b) => b.classList.toggle("active", b.dataset.pane === target));
+  $("#set-pane-llm").classList.toggle("hidden", target !== "llm");
+  $("#set-pane-asr").classList.toggle("hidden", target !== "asr");
+}
+
+document.querySelectorAll(".set-tab").forEach((btn) => {
+  btn.addEventListener("click", () => showSetPane(btn.dataset.pane));
+});
+
+async function openSettings(pane = "llm") {
   $("#set-modal").classList.remove("hidden");
+  showSetPane(pane);
   $("#set-msg").textContent = "";
   try {
     const res = await fetch("/api/settings");
@@ -1189,6 +1236,7 @@ async function openSettings() {
   } catch (e) {
     $("#set-msg").textContent = `读取设置失败：${e.message}`;
   }
+  await loadAsrStatus(true);
 }
 
 // 收集要提交的字段：Key 留空 = 不修改（绝不能用打码值覆盖真 Key）
@@ -1255,6 +1303,487 @@ $("#set-test").addEventListener("click", async () => {
     $("#set-msg").textContent = `连接失败：${e.message}`;
   }
 });
+
+// ================================================================
+// 转写模型（V3）：硬件建议 / 首次向导 / 模型下载 / 模型目录
+//
+// 这里的口径：
+//   - 模型**只有用户点下载才联网**；
+//   - 绿色＝推荐下载，红色＝配置不足不推荐（仍允许强行下载）；
+//   - 所有路径都显示出来，用户知道东西下到哪了。
+// ================================================================
+
+function fmtGB(bytes) {
+  const gb = (Number(bytes) || 0) / (1024 ** 3);
+  if (gb >= 1) return `${gb.toFixed(2)} GB`;
+  return `${Math.max(1, Math.round((Number(bytes) || 0) / 1024 / 1024))} MB`;
+}
+
+function recClass(level) {
+  if (level === "green") return "rec-green";
+  if (level === "yellow") return "rec-yellow";
+  return "rec-red";
+}
+
+function detailText(data, fallback) {
+  const d = data && data.detail;
+  if (d && typeof d === "object") return d.message || d.reason || fallback || "请求失败";
+  return d || fallback || "请求失败";
+}
+
+function endpointKey(url) {
+  const u = String(url || "");
+  if (u.includes("hf-mirror.com")) return "mirror";
+  if (u.includes("huggingface.co")) return "official";
+  return "custom";
+}
+
+async function postAsrSettings(patch) {
+  const res = await fetch("/api/asr/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(detailText(data, `HTTP ${res.status}`));
+  return data;
+}
+
+async function loadAsrStatus(force = false) {
+  try {
+    const res = await fetch(`/api/asr/status${force ? "?refresh=1" : ""}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    asrStatus = await res.json();
+    renderModelPicker();
+    renderModelBanner();
+    renderAsrPanel();
+    renderOnboard();
+    maybeShowOnboard();
+    return asrStatus;
+  } catch (e) {
+    $("#model-hint").textContent = `模型状态读取失败：${e.message}`;
+    return null;
+  }
+}
+
+function renderModelPicker() {
+  if (!asrStatus) return;
+  const cur = (asrStatus.models || []).find((m) => m.name === asrStatus.current_model)
+    || (asrStatus.models || [])[0];
+  currentModel = cur ? cur.name : (asrStatus.current_model || "small");
+  $("#model-current-label").textContent = cur ? cur.label : currentModel;
+
+  const menu = $("#model-menu");
+  menu.innerHTML = (asrStatus.models || []).map((m) => {
+    const state = m.downloaded ? (m.legacy ? "旧缓存" : "已下载") : "未下载";
+    return `
+      <div class="model-option ${m.name === currentModel ? "active" : ""}" data-model="${escapeHtml(m.name)}">
+        <span class="model-name">${escapeHtml(m.label)}</span>
+        <span class="model-desc">${escapeHtml(m.desc)} · ${fmtGB(m.size)}</span>
+        <span class="model-state ${m.downloaded ? "ok" : "missing"}">${state}</span>
+        <span class="rec-dot ${recClass(m.recommend.level)}" title="${escapeHtml(m.recommend.reason)}"></span>
+      </div>`;
+  }).join("");
+
+  const dl = asrStatus.download || {};
+  const bits = [asrStatus.machine.label || ""];
+  if (["running", "verifying", "cancelling"].includes(dl.state)) {
+    bits.push(`正在下载 ${dl.model} ${dl.percent || 0}%`);
+  } else if (cur) {
+    bits.push(cur.downloaded ? "已就绪" : `${cur.recommend.text} · ${cur.recommend.reason}`);
+  }
+  $("#model-hint").textContent = bits.filter(Boolean).join(" · ");
+  $("#model-hint").className = `model-hint ${cur && cur.downloaded ? "ok" : "warn"}`;
+}
+
+function renderModelBanner() {
+  const el = $("#model-banner");
+  if (!asrStatus) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+  const dl = asrStatus.download || {};
+  const cur = (asrStatus.models || []).find((m) => m.name === asrStatus.current_model);
+
+  if (["running", "verifying", "cancelling"].includes(dl.state)) {
+    const speed = dl.speed ? ` · ${(dl.speed / 1048576).toFixed(1)} MB/s` : "";
+    el.className = "model-banner running";
+    el.innerHTML = `正在下载 <b>${escapeHtml(dl.model || "")}</b>：${dl.percent || 0}% · `
+      + `${fmtGB(dl.done)} / ${fmtGB(dl.total)}${speed}`
+      + `<button class="btn small danger" data-model-act="cancel">取消</button>`;
+    el.classList.remove("hidden");
+    return;
+  }
+  if (cur && !cur.downloaded) {
+    el.className = "model-banner warn";
+    el.innerHTML = `当前转写模型 <b>${escapeHtml(cur.label)}</b> 还没下载（${fmtGB(cur.size)}）——`
+      + `点「转写」前先下载，或关掉转写开关只下载视频。`
+      + `<button class="btn small accent" data-model-act="download">去下载</button>`;
+    el.classList.remove("hidden");
+    return;
+  }
+  el.classList.add("hidden");
+  el.innerHTML = "";
+}
+
+async function chooseModel(name) {
+  if (!name || !asrStatus) return;
+  try {
+    await postAsrSettings({ model: name });
+    await loadAsrStatus(true);
+  } catch (e) {
+    flash(`切换模型失败：${e.message}`);
+    return;
+  }
+  const row = (asrStatus.models || []).find((m) => m.name === name);
+  if (row && !row.downloaded) {
+    flash(`${name} 还没下载，先去「设置 → 转写模型」下载它。`);
+    openSettings("asr");
+  }
+}
+
+// 记录上一次由状态接口写进输入框的值：用户正在改的时候不要把手输入覆盖掉
+let asrPanelLast = { dir: "", proxy: "" };
+
+function renderAsrPanel() {
+  if (!asrStatus) return;
+  const md = asrStatus.models_dir || {};
+  const dirEl = $("#asr-dir");
+  if (document.activeElement !== dirEl && (!dirEl.value || dirEl.value === asrPanelLast.dir)) {
+    dirEl.value = md.path || "";
+  }
+  asrPanelLast.dir = md.path || "";
+  $("#asr-dir-note").textContent =
+    `${md.is_default ? "默认目录" : "自定义目录"} · 剩余 ${md.free_gb || 0} GB · ${md.writable ? "可写" : "不可写"}`;
+  $("#asr-dir-note").className = `field-note ${md.writable ? "" : "err-text"}`;
+  $("#asr-endpoint").value = endpointKey(asrStatus.endpoint);
+  $("#asr-custom-endpoint").value = endpointKey(asrStatus.endpoint) === "custom"
+    ? (asrStatus.endpoint || "") : "";
+  $("#asr-custom-wrap").classList.toggle("hidden", $("#asr-endpoint").value !== "custom");
+  const proxyEl = $("#asr-proxy");
+  if (document.activeElement !== proxyEl && (!proxyEl.value || proxyEl.value === asrPanelLast.proxy)) {
+    proxyEl.value = asrStatus.proxy || "";
+  }
+  asrPanelLast.proxy = asrStatus.proxy || "";
+  $("#asr-device").value = asrStatus.device || "auto";
+  $("#asr-machine").textContent = `${asrStatus.machine.label} · 模型目录剩余 ${md.free_gb || 0} GB`;
+  renderAsrModels();
+}
+
+function renderAsrModels() {
+  const box = $("#asr-models");
+  if (!asrStatus || !box) return;
+  const dl = asrStatus.download || {};
+  box.innerHTML = (asrStatus.models || []).map((m) => {
+    const active = dl.model === m.name && ["running", "verifying", "cancelling"].includes(dl.state);
+    let actions = "";
+    if (active) {
+      const label = dl.state === "cancelling"
+        ? "正在取消…"
+        : `${dl.percent || 0}% · ${fmtGB(dl.done)} / ${fmtGB(dl.total)}`
+          + (dl.speed ? ` · ${(dl.speed / 1048576).toFixed(1)} MB/s` : "");
+      actions = `<div class="asr-progress">
+          <div class="bar"><div style="width:${dl.percent || 0}%"></div></div>
+          <span>${label}</span>
+          <button class="btn small danger" data-asr-act="cancel">取消</button>
+        </div>`;
+    } else if (m.downloaded) {
+      actions = `<span class="badge sum-ok">已下载 ${fmtGB(m.downloaded_bytes)}${m.legacy ? " · 旧缓存" : ""}</span>`
+        + (m.legacy ? "" : `<button class="btn small danger" data-asr-act="delete" data-model="${m.name}">删除</button>`);
+    } else {
+      actions = `<button class="btn small accent" data-asr-act="download" data-model="${m.name}">下载</button>`;
+    }
+    return `
+      <div class="asr-model ${active ? "active" : ""}" data-model="${m.name}">
+        <div class="asr-model-main">
+          <div class="asr-model-head">
+            <b>${escapeHtml(m.label)}</b>
+            <span class="rec-text ${recClass(m.recommend.level)}">${escapeHtml(m.recommend.text)}</span>
+            <span class="asr-model-size">${fmtGB(m.size)}</span>
+          </div>
+          <div class="asr-model-desc">${escapeHtml(m.desc)}</div>
+          <div class="asr-model-reason">${escapeHtml(m.recommend.reason)}</div>
+        </div>
+        <div class="asr-model-actions">${actions}</div>
+      </div>`;
+  }).join("");
+}
+
+// ---------- 下载状态轮询 ----------
+function setAsrMsg(onboard, message) {
+  const el = onboard ? $("#onboard-msg") : $("#asr-msg");
+  if (el) el.textContent = message || "";
+}
+
+function renderOnboardProgress(dl, onboard) {
+  if (!onboard) return;
+  const box = $("#onboard-progress");
+  if (!box) return;
+  box.classList.remove("hidden");
+  $("#onboard-progress-fill").style.width = `${dl.percent || 0}%`;
+  const speed = dl.speed ? ` · ${(dl.speed / 1048576).toFixed(1)} MB/s` : "";
+  $("#onboard-progress-label").textContent =
+    `${dl.percent || 0}% · ${fmtGB(dl.done)} / ${fmtGB(dl.total)}${speed}`;
+}
+
+async function startAsrDownload(name, onboard = false, endpoint = null, custom = "") {
+  if (!name) return;
+  try {
+    if (endpoint) await postAsrSettings({ endpoint, custom_endpoint: custom });
+    const res = await fetch("/api/asr/download", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: name }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok && res.status !== 409) throw new Error(detailText(data, "下载启动失败"));
+  } catch (e) {
+    setAsrMsg(onboard, e.message);
+    $("#onboard-start").disabled = false;
+    return;
+  }
+  setAsrMsg(onboard, "");
+  pollAsrDownload(onboard);
+}
+
+function pollAsrDownload(onboard = false) {
+  if (asrPollTimer) clearTimeout(asrPollTimer);
+  const tick = async () => {
+    try {
+      const res = await fetch("/api/asr/download");
+      const dl = await res.json();
+      if (asrStatus) asrStatus.download = dl;
+      renderAsrModels();
+      renderModelPicker();
+      renderModelBanner();
+      renderOnboardProgress(dl, onboard);
+      if (["running", "verifying", "cancelling"].includes(dl.state)) {
+        asrPollTimer = setTimeout(tick, 800);
+        return;
+      }
+      asrPollTimer = null;
+      if (dl.state === "done") {
+        $("#onboard-start").disabled = false;
+        await loadAsrStatus(true);
+        if (onboard) await finishOnboard("download");
+        else flash(`模型 ${dl.model} 下载完成`);
+      } else if (dl.state === "error") {
+        $("#onboard-start").disabled = false;
+        setAsrMsg(onboard, `下载失败：${dl.error || "未知错误"}`);
+      } else if (dl.state === "cancelled") {
+        $("#onboard-start").disabled = false;
+        setAsrMsg(onboard, "下载已取消（已下载的部分会保留，下次点下载会续传）");
+      }
+    } catch (_) {
+      asrPollTimer = setTimeout(tick, 1500);
+    }
+  };
+  tick();
+}
+
+async function cancelAsrDownload() {
+  try {
+    const res = await fetch("/api/asr/download/cancel", { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data, "取消失败"));
+    flash("正在取消下载…");
+  } catch (e) {
+    flash(`取消下载失败：${e.message}`);
+  }
+}
+
+// ---------- 设置里的「转写模型」 ----------
+$("#asr-endpoint").addEventListener("change", () => {
+  $("#asr-custom-wrap").classList.toggle("hidden", $("#asr-endpoint").value !== "custom");
+});
+$("#onboard-endpoint").addEventListener("change", () => {
+  $("#onboard-custom-wrap").classList.toggle("hidden", $("#onboard-endpoint").value !== "custom");
+});
+
+$("#asr-save").addEventListener("click", async () => {
+  $("#asr-msg").textContent = "保存中…";
+  try {
+    await postAsrSettings({
+      dir: $("#asr-dir").value.trim(),
+      endpoint: $("#asr-endpoint").value,
+      custom_endpoint: $("#asr-custom-endpoint").value.trim(),
+      proxy: $("#asr-proxy").value.trim(),
+      device: $("#asr-device").value,
+    });
+    await loadAsrStatus(true);
+    $("#asr-msg").textContent = "已保存 ✓";
+    flash("转写模型设置已保存");
+  } catch (e) {
+    $("#asr-msg").textContent = `保存失败：${e.message}`;
+  }
+});
+
+$("#asr-dir-browse").addEventListener("click", async () => {
+  $("#asr-dir-note").textContent = "正在打开目录选择框…";
+  try {
+    const res = await fetch("/api/asr/pick-dir", { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data, "没有选到目录"));
+    $("#asr-dir").value = data.path;
+    $("#asr-dir-note").textContent = `已选择：${data.path}（点「保存这些设置」生效）`;
+  } catch (e) {
+    $("#asr-dir-note").textContent = e.message;
+  }
+});
+
+$("#asr-dir-open").addEventListener("click", async () => {
+  try {
+    const res = await fetch("/api/asr/open-dir", { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data, "打开失败"));
+    flash(`已打开模型目录：${data.path}`);
+  } catch (e) {
+    flash(`打开模型目录失败：${e.message}`);
+  }
+});
+
+$("#asr-models").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button[data-asr-act]");
+  if (!btn) return;
+  const act = btn.dataset.asrAct;
+  const name = btn.dataset.model;
+  if (act === "cancel") { await cancelAsrDownload(); return; }
+  if (act === "download") { startAsrDownload(name, false); return; }
+  if (act === "delete") {
+    if (!confirm(`删除模型 ${name}？\n只会删当前模型目录里的文件，不会动《已有文稿》和视频。`)) return;
+    try {
+      const res = await fetch(`/api/asr/models/${encodeURIComponent(name)}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(detailText(data, "删除失败"));
+      flash(`已删除模型 ${name}`);
+      await loadAsrStatus(true);
+    } catch (err) {
+      flash(`删除失败：${err.message}`);
+    }
+  }
+});
+
+$("#model-banner").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-model-act]");
+  if (btn && btn.dataset.modelAct === "cancel") cancelAsrDownload();
+});
+
+// ---------- 首次向导 ----------
+function renderOnboard() {
+  if (!asrStatus) return;
+  const m = asrStatus.machine || {};
+  const cuda = m.cuda || {};
+  const gpu = m.gpu || {};
+  const md = asrStatus.models_dir || {};
+  const checks = [
+    ["系统", true, `${m.os || ""} · ${m.cpu_cores || 0} 核 / ${m.ram_gb || 0} GB 内存`, ""],
+    ["显卡", !!gpu.present, gpu.present ? `${gpu.name} · ${gpu.vram_mb || 0} MB` : "未检测到 NVIDIA 显卡", ""],
+    ["CUDA", !!cuda.available, cuda.available ? "可用，可以用 GPU 转写" : (cuda.reason || "不可用，转写走 CPU"), ""],
+    ["ffmpeg", !!(m.ffmpeg && m.ffmpeg.available),
+      (m.ffmpeg && m.ffmpeg.available) ? "已就绪" : "未找到（只下载视频会失败）", ""],
+    ["模型目录", !!md.writable, `${md.path || ""} · 剩余 ${md.free_gb || 0} GB`,
+      md.writable ? "" : "目录不可写，请换个位置"],
+  ];
+  $("#onboard-checks").innerHTML = checks.map(([label, ok, text, note]) => `
+    <div class="check-item ${ok ? "ok" : "warn"}">
+      <span class="check-dot"></span>
+      <span class="check-label">${escapeHtml(label)}</span>
+      <span class="check-text">${escapeHtml(text)}${note ? ` · ${escapeHtml(note)}` : ""}</span>
+    </div>`).join("");
+
+  $("#onboard-models").innerHTML = (asrStatus.models || []).map((x) => `
+    <label class="onboard-model ${onboardSelected === x.name ? "active" : ""} ${recClass(x.recommend.level)}">
+      <input type="radio" name="onboard-model" value="${escapeHtml(x.name)}" ${onboardSelected === x.name ? "checked" : ""}>
+      <span class="onboard-model-body">
+        <span class="onboard-model-head">
+          <b>${escapeHtml(x.label)}</b>
+          <span class="rec-text ${recClass(x.recommend.level)}">${escapeHtml(x.recommend.text)}</span>
+          <span class="asr-model-size">${fmtGB(x.size)}</span>
+          ${x.downloaded ? '<span class="badge done">已下载</span>' : ""}
+        </span>
+        <span class="onboard-model-desc">${escapeHtml(x.desc)}</span>
+        <span class="onboard-model-reason">${escapeHtml(x.recommend.reason)}</span>
+      </span>
+    </label>`).join("");
+}
+
+$("#onboard-models").addEventListener("click", (e) => {
+  const card = e.target.closest(".onboard-model");
+  if (!card) return;
+  const input = card.querySelector("input[name=onboard-model]");
+  if (input) {
+    input.checked = true;
+    onboardSelected = input.value;
+    renderOnboard();
+  }
+});
+
+function maybeShowOnboard() {
+  if (!asrStatus || asrStatus.onboarded || onboardShown) return;
+  onboardShown = true;
+  const models = asrStatus.models || [];
+  const current = models.find((m) => m.name === asrStatus.current_model && m.downloaded);
+  const small = models.find((m) => m.name === "small");
+  onboardSelected = current ? current.name : (small ? "small" : (models[0]?.name || "small"));
+  $("#onboard-endpoint").value = endpointKey(asrStatus.endpoint);
+  $("#onboard-custom-endpoint").value = endpointKey(asrStatus.endpoint) === "custom"
+    ? asrStatus.endpoint : "";
+  $("#onboard-custom-wrap").classList.toggle("hidden", $("#onboard-endpoint").value !== "custom");
+  $("#onboard-msg").textContent = "";
+  $("#onboard-progress").classList.add("hidden");
+  $("#onboard-progress-fill").style.width = "0%";
+  renderOnboard();
+  $("#onboard-modal").classList.remove("hidden");
+}
+
+async function finishOnboard(mode) {
+  const model = onboardSelected || asrStatus.current_model || "small";
+  // 先把界面动作做完，再去拉状态：用户点完「先不下载」应该立刻看到转写开关关掉。
+  if (mode === "skip") $("#opt-transcribe").checked = false;
+  if (mode === "later" && asrStatus && asrStatus.needs_model) $("#opt-transcribe").checked = false;
+  $("#onboard-modal").classList.add("hidden");
+  $("#onboard-start").disabled = false;
+  try {
+    await postAsrSettings({ model, onboarded: true });
+  } catch (_) { /* 标记失败也不该卡住用户 */ }
+  await loadAsrStatus(true);
+  if (mode === "skip") {
+    flash("已跳过模型下载：现在可以先只下载视频。之后随时在「设置 → 转写模型」下载。");
+  } else if (mode === "later") {
+    flash("已收起向导。需要转写时再到「设置 → 转写模型」下载。");
+  } else {
+    $("#opt-transcribe").checked = true;
+    flash(`模型 ${model} 已就绪，可以开始转写了`);
+  }
+}
+
+$("#onboard-start").addEventListener("click", async () => {
+  const endpoint = $("#onboard-endpoint").value;
+  const custom = $("#onboard-custom-endpoint").value.trim();
+  if (endpoint === "custom" && !custom) {
+    $("#onboard-msg").textContent = "选了自定义下载源，请把地址填上（或以官方/镜像为准）。";
+    return;
+  }
+  const row = (asrStatus.models || []).find((m) => m.name === onboardSelected);
+  if (row && row.recommend.level === "red") {
+    if (!confirm(`${row.label} 在你的配置上不推荐：${row.recommend.reason}\n仍要下载吗？`)) return;
+  }
+  if (row && row.downloaded) {
+    await finishOnboard("download");
+    return;
+  }
+  $("#onboard-start").disabled = true;
+  $("#onboard-msg").textContent = "准备下载…";
+  await startAsrDownload(onboardSelected, true, endpoint, custom);
+});
+
+$("#onboard-skip").addEventListener("click", () => finishOnboard("skip"));
+$("#onboard-close").addEventListener("click", () => finishOnboard("later"));
+$("#onboard-modal").addEventListener("click", (e) => {
+  if (e.target === $("#onboard-modal")) finishOnboard("later");
+});
+
+// 顶栏/设置打开时同步一次模型状态
+(async function initAsrStatus() {
+  await loadAsrStatus();
+})();
 
 // ================================================================
 // 顶栏：打开本地输出目录
