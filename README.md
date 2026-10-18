@@ -31,7 +31,7 @@
 
 ### 普通用户：便携版（推荐）
 
-1. 下载 `bili-note-v3-portable-win64.zip`（GitHub Releases）；
+1. 打开 [Releases 页面](https://github.com/Eos010/bili-note/releases/latest)，下载 `bili-note-v3-portable-win64.zip`；
 2. **解压到可写目录**，例如 `D:\bili-note`。
    不要放 `C:\Program Files`——程序要把 `config.json` / `output/` / `models/` 写在 exe 旁边；
 3. 双击 `bili-note.exe`；
